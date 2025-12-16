@@ -285,13 +285,14 @@ pub fn calculate_total_sample_rate(waveforms: &[WaveformType]) -> u16 {
 }
 
 /// Validate that a set of waveforms doesn't exceed max sample rate
-pub fn validate_waveform_set(waveforms: &[WaveformType]) -> Result<(), String> {
+pub fn validate_waveform_set(waveforms: &[WaveformType]) -> anyhow::Result<()> {
     let total = calculate_total_sample_rate(waveforms);
     if total > MAX_TOTAL_SAMPLE_RATE {
-        Err(format!(
+        anyhow::bail!(
             "Total sample rate {} exceeds maximum {}",
-            total, MAX_TOTAL_SAMPLE_RATE
-        ))
+            total,
+            MAX_TOTAL_SAMPLE_RATE
+        )
     } else {
         Ok(())
     }
