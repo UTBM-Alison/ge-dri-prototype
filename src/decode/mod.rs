@@ -1,6 +1,7 @@
 //! Data decoding module
 
 pub mod physiological;
+pub mod status_bits;
 pub mod subrecords;
 pub mod waveforms;
 
