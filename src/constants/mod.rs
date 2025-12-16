@@ -2,12 +2,14 @@
 
 pub mod dri_types;
 pub mod physiological;
+pub mod scaling;
 pub mod special_values;
 pub mod waveforms;
 
 // Re-export commonly used types
 pub use dri_types::{DriLevel, DriMainType, PhdbClass, PhdbSubrecordType};
 pub use physiological::{EcgLeadType, InvasivePressureLabel, ParameterGroup};
+pub use scaling::*;
 pub use special_values::SpecialValue;
 pub use waveforms::{WaveformInfo, WaveformType};
 

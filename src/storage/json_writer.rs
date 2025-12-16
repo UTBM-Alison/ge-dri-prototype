@@ -1,59 +1,37 @@
-//! JSON data writer
+//! JSON file writer for DRI data
 
-use crate::Result;
-use crate::decode::{PhysiologicalData, WaveformData};
+use crate::decode::physiological::PhysiologicalData;
+use crate::decode::waveforms::WaveformData;
+use anyhow::Result;
 use serde_json;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 
-/// Writer for JSON-formatted data
 pub struct JsonWriter {
-    file: File,
-    record_count: usize,
+    file: std::fs::File,
 }
 
 impl JsonWriter {
-    /// Create a new JSON writer
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
 
-        Ok(Self {
-            file,
-            record_count: 0,
-        })
+        Ok(Self { file })
     }
 
-    /// Write physiological data as JSON
+    /// Write physiological data as JSON line
     pub fn write_physiological(&mut self, data: &PhysiologicalData) -> Result<()> {
         let json = serde_json::to_string(data)?;
         writeln!(self.file, "{}", json)?;
-        self.record_count += 1;
-        Ok(())
-    }
-
-    /// Write waveform data as JSON
-    pub fn write_waveform(&mut self, data: &WaveformData) -> Result<()> {
-        let json = serde_json::to_string(data)?;
-        writeln!(self.file, "{}", json)?;
-        self.record_count += 1;
-        Ok(())
-    }
-
-    /// Flush buffered data to disk
-    pub fn flush(&mut self) -> Result<()> {
         self.file.flush()?;
         Ok(())
     }
 
-    /// Get number of records written
-    pub fn record_count(&self) -> usize {
-        self.record_count
-    }
-}
-
-impl Drop for JsonWriter {
-    fn drop(&mut self) {
-        let _ = self.flush();
+    /// Write waveform data as JSON line
+    pub fn write_waveform(&mut self, data: &WaveformData) -> Result<()> {
+        let json = serde_json::to_string(data)?;
+        writeln!(self.file, "{}", json)?;
+        self.file.flush()?;
+        Ok(())
     }
 }

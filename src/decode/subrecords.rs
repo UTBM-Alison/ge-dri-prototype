@@ -3,50 +3,24 @@
 use crate::constants::special_values;
 
 /// Read a 16-bit signed integer from data (little-endian)
-pub fn read_i16(data: &[u8], offset: usize) -> Option<i16> {
-    if offset + 2 > data.len() {
-        return None;
-    }
-    Some(i16::from_le_bytes([data[offset], data[offset + 1]]))
+pub fn read_i16(data: &[u8]) -> i16 {
+    i16::from_le_bytes([data[0], data[1]])
 }
 
 /// Read a 32-bit unsigned integer from data (little-endian)
-pub fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
-    if offset + 4 > data.len() {
-        return None;
-    }
-    Some(u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ]))
+pub fn read_u32(data: &[u8]) -> u32 {
+    u32::from_le_bytes([data[0], data[1], data[2], data[3]])
 }
 
 /// Read a 16-bit unsigned integer from data (little-endian)
-pub fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
-    if offset + 2 > data.len() {
-        return None;
-    }
-    Some(u16::from_le_bytes([data[offset], data[offset + 1]]))
+pub fn read_u16(data: &[u8]) -> u16 {
+    u16::from_le_bytes([data[0], data[1]])
 }
 
 /// Read and validate an i16, returning None if invalid
-pub fn read_valid_i16(data: &[u8], offset: usize) -> Option<i16> {
-    let value = read_i16(data, offset)?;
+pub fn read_valid_i16(data: &[u8]) -> Option<i16> {
+    let value = read_i16(data);
     special_values::check_valid(value)
-}
-
-/// Parse group header (6 bytes: 4 bytes status + 2 bytes label)
-pub fn parse_group_header(data: &[u8], offset: usize) -> Option<GroupHeader> {
-    if offset + 6 > data.len() {
-        return None;
-    }
-
-    let status = read_u32(data, offset)?;
-    let label = read_u16(data, offset + 4)?;
-
-    Some(GroupHeader { status, label })
 }
 
 /// Group header structure (common to many parameter groups)
@@ -57,6 +31,18 @@ pub struct GroupHeader {
 }
 
 impl GroupHeader {
+    /// Parse group header from data (6 bytes: 4 bytes status + 2 bytes label)
+    pub fn parse(data: &[u8]) -> anyhow::Result<Self> {
+        if data.len() < 6 {
+            return Err(anyhow::anyhow!("Group header data too short"));
+        }
+
+        let status = read_u32(&data[0..4]);
+        let label = read_u16(&data[4..6]);
+
+        Ok(GroupHeader { status, label })
+    }
+
     /// Check if module exists
     pub fn exists(&self) -> bool {
         (self.status & 0x01) != 0
@@ -101,9 +87,8 @@ mod tests {
     #[test]
     fn test_read_i16() {
         let data = vec![0x34, 0x12, 0xFF, 0xFF];
-        assert_eq!(read_i16(&data, 0), Some(0x1234));
-        assert_eq!(read_i16(&data, 2), Some(-1));
-        assert_eq!(read_i16(&data, 3), None); // Out of bounds
+        assert_eq!(read_i16(&data[0..2]), 0x1234);
+        assert_eq!(read_i16(&data[2..4]), -1);
     }
 
     #[test]

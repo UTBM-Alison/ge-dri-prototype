@@ -2,6 +2,7 @@
 name = "ge-dri-prototype"
 version = "0.1.0"
 edition = "2024"
+default-run = "ge-dri-prototype"
 
 [[bin]]
 name = "ge-dri-prototype"
@@ -31,6 +32,9 @@ dialoguer = "0.11"
 # Logging
 log = "0.4"
 env_logger = "0.11"
+
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
 
 # Byte manipulation
 bytes = "1.5"
