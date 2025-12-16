@@ -1,8 +1,8 @@
 //! Waveform data decoding
 
-use crate::Result;
 use crate::constants::WaveformType;
 use crate::protocol::DriHeader;
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
@@ -54,14 +54,14 @@ struct WaveformHeader {
 }
 
 impl WaveformHeader {
-    fn parse(data: &[u8], offset: usize) -> Option<Self> {
-        if offset + 6 > data.len() {
+    fn parse(data: &[u8]) -> Option<Self> {
+        if data.len() < 6 {
             return None;
         }
 
-        let act_len = read_u16(data, offset)?;
-        let status = read_u16(data, offset + 2)?;
-        let _reserved = read_u16(data, offset + 4)?;
+        let act_len = read_u16(&data[0..2]);
+        let status = read_u16(&data[2..4]);
+        let _reserved = read_u16(&data[4..6]);
 
         Some(Self {
             act_len,
@@ -101,8 +101,8 @@ pub fn decode_waveforms(header: &DriHeader, data: &[u8]) -> Result<Vec<WaveformD
             }
         };
 
-        // Parse waveform header
-        let wf_header = match WaveformHeader::parse(sub_data, 0) {
+        // Parse waveform header (first 6 bytes)
+        let wf_header = match WaveformHeader::parse(sub_data) {
             Some(h) => h,
             None => {
                 warn!("Failed to parse waveform header");
@@ -116,12 +116,16 @@ pub fn decode_waveforms(header: &DriHeader, data: &[u8]) -> Result<Vec<WaveformD
 
         for sample_idx in 0..sample_count {
             let offset = 6 + (sample_idx * 2); // Each sample is 2 bytes
-            if let Some(sample) = read_i16(sub_data, offset) {
+            if offset + 2 <= sub_data.len() {
+                let sample = read_i16(&sub_data[offset..offset + 2]);
                 samples.push(sample);
             } else {
                 warn!(
-                    "Failed to read sample {} for {:?}",
-                    sample_idx, waveform_type
+                    "Failed to read sample {} for {:?} (offset {} exceeds data length {})",
+                    sample_idx,
+                    waveform_type,
+                    offset,
+                    sub_data.len()
                 );
                 break;
             }

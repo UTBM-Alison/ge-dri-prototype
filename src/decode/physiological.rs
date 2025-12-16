@@ -1,23 +1,23 @@
 //! Physiological data decoding
 
+use anyhow::{Result, anyhow};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+
+// Import from constants
+use crate::constants::dri_types::{PhdbClass, PhdbSubrecordType};
+use crate::constants::physiological::{
+    AnesthesiaAgent, EcgLeadType, HrSource, InvasivePressureLabel, TemperatureLabel,
+};
+use crate::constants::scaling::{
+    SCALE_AWP_100, SCALE_COMPLIANCE_100, SCALE_IR_AMP_10, SCALE_MAC_100, SCALE_PERCENT_100,
+    SCALE_PRESSURE_100, SCALE_ST_100, SCALE_TEMP_100, SCALE_VOLUME_10, scale_valid_i16,
+};
+use crate::constants::special_values::is_invalid;
+
+// Import from same module
 use super::status_bits::*;
 use super::subrecords::*;
-use crate::constants::special_values::is_invalid;
-use crate::constants::{
-    PhdbClass, PhdbSubrecordType, SCALE_AWP_100, SCALE_COMPLIANCE_100, SCALE_IR_AMP_10,
-    SCALE_MAC_100, SCALE_PERCENT_100, SCALE_PRESSURE_100, SCALE_ST_100, SCALE_TEMP_100,
-    SCALE_VOLUME_10,
-    physiological::{
-        AnesthesiaAgent, EcgLeadType, HrSource, InvasivePressureLabel, TemperatureLabel,
-    },
-    scale_valid_i16,
-};
-use crate::protocol::DriHeader;
-use crate::{DriError, Result};
-use anyhow::anyhow;
-use chrono::{DateTime, Utc};
-use log::debug;
-use serde::{Deserialize, Serialize};
 
 /// Physiological data record with properly scaled values
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,37 +191,47 @@ impl PhysiologicalData {
     }
 }
 
-/// Decode physiological data from a frame
-pub fn decode_physiological(header: &DriHeader, data: &[u8]) -> Result<PhysiologicalData> {
-    if header.subrecords.is_empty() {
-        return Err(DriError::IncompleteFrame.into());
+/// Decode physiological data from a DRI subrecord
+pub fn decode_physiological(
+    subrecord_data: &[u8],
+    subtype: PhdbSubrecordType,
+    class: PhdbClass,
+) -> Result<PhysiologicalData> {
+    if subrecord_data.len() < 1088 {
+        return Err(anyhow!(
+            "Physiological subrecord too short: {} bytes",
+            subrecord_data.len()
+        ));
     }
 
-    // Get the first subrecord
-    let subrecord = &header.subrecords[0];
-    let subtype = PhdbSubrecordType::from_u8(subrecord.sr_type)
-        .ok_or(DriError::InvalidSubrecordType(subrecord.sr_type))?;
+    // Parse timestamp (first 4 bytes)
+    let timestamp_raw = read_u32(&subrecord_data[0..4]);
+    let timestamp = DateTime::from_timestamp(timestamp_raw as i64, 0)
+        .ok_or_else(|| anyhow!("Invalid timestamp: {}", timestamp_raw))?;
 
-    // Get subrecord data
-    let sub_data = header.get_subrecord_data(data, 0)?;
-
-    // Parse timestamp (first 4 bytes of subrecord)
-    let timestamp_raw = read_u32(sub_data, 0).ok_or(DriError::IncompleteFrame)?;
-    let timestamp = DateTime::from_timestamp(timestamp_raw as i64, 0).unwrap_or_else(|| Utc::now());
-
-    debug!(
-        "Decoding physiological data: timestamp={}, subtype={:?}",
-        timestamp, subtype
-    );
-
-    // Determine class from the last 2 bytes of subrecord (offset depends on size)
-    // For now, assume Basic class
-    let class = PhdbClass::Basic;
-
+    // Create empty physiological data structure
     let mut phys = PhysiologicalData::empty(timestamp, class, subtype);
 
-    // Decode Basic class data (starts at offset 4, after timestamp)
-    decode_basic_class(&mut phys, sub_data, 4)?;
+    // Decode based on class (data starts at offset 4, after timestamp)
+    let class_data = &subrecord_data[4..];
+
+    match class {
+        PhdbClass::Basic => {
+            decode_basic_class(class_data, &mut phys)?;
+        }
+        PhdbClass::Ext1 => {
+            // TODO: Implement Ext1 class decoding in Phase 2
+            log::debug!("Ext1 class decoding not yet implemented");
+        }
+        PhdbClass::Ext2 => {
+            // TODO: Implement Ext2 class decoding in Phase 2
+            log::debug!("Ext2 class decoding not yet implemented");
+        }
+        PhdbClass::Ext3 => {
+            // TODO: Implement Ext3 class decoding in Phase 2
+            log::debug!("Ext3 class decoding not yet implemented");
+        }
+    }
 
     Ok(phys)
 }
@@ -255,8 +265,6 @@ fn decode_basic_class(data: &[u8], phys: &mut PhysiologicalData) -> Result<()> {
         phys.invp1_label = label;
     }
 
-    // Skip INVP2-4 for now (offsets 30, 44, 58)
-
     // NIBP (offset 76, 14 bytes)
     if data.len() >= 90 {
         let (status, sys, dia, mean, hr) = parse_nibp_group(&data[76..90])?;
@@ -282,8 +290,6 @@ fn decode_basic_class(data: &[u8], phys: &mut PhysiologicalData) -> Result<()> {
         phys.temp2 = temp;
         phys.temp2_label = label;
     }
-
-    // Skip TEMP3-4 for now (offsets 106, 114)
 
     // SpO2 (offset 122, 14 bytes)
     if data.len() >= 136 {
@@ -392,14 +398,9 @@ fn parse_ecg_group(
     };
 
     // ST levels - scale from 1/100 mm to mm
-    let st1_raw = read_i16(&data[8..10]);
-    let st1 = scale_valid_i16(st1_raw, SCALE_ST_100);
-
-    let st2_raw = read_i16(&data[10..12]);
-    let st2 = scale_valid_i16(st2_raw, SCALE_ST_100);
-
-    let st3_raw = read_i16(&data[12..14]);
-    let st3 = scale_valid_i16(st3_raw, SCALE_ST_100);
+    let st1 = scale_valid_i16(read_i16(&data[8..10]), SCALE_ST_100);
+    let st2 = scale_valid_i16(read_i16(&data[10..12]), SCALE_ST_100);
+    let st3 = scale_valid_i16(read_i16(&data[12..14]), SCALE_ST_100);
 
     // Impedance RR - no scaling needed
     let rr_raw = read_i16(&data[14..16]);
@@ -451,21 +452,12 @@ fn parse_invp_group(
 
     let header = GroupHeader::parse(&data[0..6])?;
     let status = GenericStatus::from_status(header.status);
-
-    // Label
     let label = InvasivePressureLabel::from_u16(header.label);
 
-    // Systolic - scale from 1/100 mmHg to mmHg
-    let sys_raw = read_i16(&data[6..8]);
-    let sys = scale_valid_i16(sys_raw, SCALE_PRESSURE_100);
-
-    // Diastolic
-    let dia_raw = read_i16(&data[8..10]);
-    let dia = scale_valid_i16(dia_raw, SCALE_PRESSURE_100);
-
-    // Mean
-    let mean_raw = read_i16(&data[10..12]);
-    let mean = scale_valid_i16(mean_raw, SCALE_PRESSURE_100);
+    // Scale from 1/100 mmHg to mmHg
+    let sys = scale_valid_i16(read_i16(&data[6..8]), SCALE_PRESSURE_100);
+    let dia = scale_valid_i16(read_i16(&data[8..10]), SCALE_PRESSURE_100);
+    let mean = scale_valid_i16(read_i16(&data[10..12]), SCALE_PRESSURE_100);
 
     // HR - no scaling
     let hr_raw = read_i16(&data[12..14]);
@@ -500,21 +492,12 @@ fn parse_nibp_group(
     }
 
     let header = GroupHeader::parse(&data[0..6])?;
-
-    // Parse status from label field (not status field for NIBP)
     let nibp_status = NibpStatus::from_label(header.label);
 
-    // Systolic - scale from 1/100 mmHg to mmHg
-    let sys_raw = read_i16(&data[6..8]);
-    let sys = scale_valid_i16(sys_raw, SCALE_PRESSURE_100);
-
-    // Diastolic
-    let dia_raw = read_i16(&data[8..10]);
-    let dia = scale_valid_i16(dia_raw, SCALE_PRESSURE_100);
-
-    // Mean
-    let mean_raw = read_i16(&data[10..12]);
-    let mean = scale_valid_i16(mean_raw, SCALE_PRESSURE_100);
+    // Scale from 1/100 mmHg to mmHg
+    let sys = scale_valid_i16(read_i16(&data[6..8]), SCALE_PRESSURE_100);
+    let dia = scale_valid_i16(read_i16(&data[8..10]), SCALE_PRESSURE_100);
+    let mean = scale_valid_i16(read_i16(&data[10..12]), SCALE_PRESSURE_100);
 
     // HR - no scaling
     let hr_raw = read_i16(&data[12..14]);
@@ -540,13 +523,10 @@ fn parse_temp_group(data: &[u8]) -> Result<(GenericStatus, Option<f64>, Option<T
 
     let header = GroupHeader::parse(&data[0..6])?;
     let status = GenericStatus::from_status(header.status);
-
-    // Label
     let label = TemperatureLabel::from_u16(header.label);
 
-    // Temperature - scale from 1/100 °C to °C
-    let temp_raw = read_i16(&data[6..8]);
-    let temp = scale_valid_i16(temp_raw, SCALE_TEMP_100);
+    // Scale from 1/100 °C to °C
+    let temp = scale_valid_i16(read_i16(&data[6..8]), SCALE_TEMP_100);
 
     Ok((status, temp, label))
 }
@@ -566,9 +546,8 @@ fn parse_spo2_group(data: &[u8]) -> Result<(Spo2Status, Option<f64>, Option<f64>
     let header = GroupHeader::parse(&data[0..6])?;
     let spo2_status = Spo2Status::from_status(header.status);
 
-    // SpO2 - scale from 1/100 % to %
-    let spo2_raw = read_i16(&data[6..8]);
-    let spo2 = scale_valid_i16(spo2_raw, SCALE_PERCENT_100);
+    // Scale from 1/100 % to %
+    let spo2 = scale_valid_i16(read_i16(&data[6..8]), SCALE_PERCENT_100);
 
     // Pulse rate - no scaling
     let pr_raw = read_i16(&data[8..10]);
@@ -579,8 +558,7 @@ fn parse_spo2_group(data: &[u8]) -> Result<(Spo2Status, Option<f64>, Option<f64>
     };
 
     // IR amplitude - scale from 1/10 % to %
-    let ir_amp_raw = read_i16(&data[10..12]);
-    let ir_amp = scale_valid_i16(ir_amp_raw, SCALE_IR_AMP_10);
+    let ir_amp = scale_valid_i16(read_i16(&data[10..12]), SCALE_IR_AMP_10);
 
     Ok((spo2_status, spo2, pr, ir_amp))
 }
@@ -600,13 +578,9 @@ fn parse_co2_group(data: &[u8]) -> Result<(Co2Status, Option<f64>, Option<f64>, 
     let header = GroupHeader::parse(&data[0..6])?;
     let co2_status = Co2Status::from_status(header.status);
 
-    // ET - scale from 1/100 % to %
-    let et_raw = read_i16(&data[6..8]);
-    let et = scale_valid_i16(et_raw, SCALE_PERCENT_100);
-
-    // FI - scale from 1/100 % to %
-    let fi_raw = read_i16(&data[8..10]);
-    let fi = scale_valid_i16(fi_raw, SCALE_PERCENT_100);
+    // Scale from 1/100 % to %
+    let et = scale_valid_i16(read_i16(&data[6..8]), SCALE_PERCENT_100);
+    let fi = scale_valid_i16(read_i16(&data[8..10]), SCALE_PERCENT_100);
 
     // RR - no scaling
     let rr_raw = read_i16(&data[10..12]);
@@ -633,13 +607,9 @@ fn parse_o2_group(data: &[u8]) -> Result<(GasStatus, Option<f64>, Option<f64>)> 
     let header = GroupHeader::parse(&data[0..6])?;
     let o2_status = GasStatus::from_status(header.status);
 
-    // ET - scale from 1/100 % to %
-    let et_raw = read_i16(&data[6..8]);
-    let et = scale_valid_i16(et_raw, SCALE_PERCENT_100);
-
-    // FI - scale from 1/100 % to %
-    let fi_raw = read_i16(&data[8..10]);
-    let fi = scale_valid_i16(fi_raw, SCALE_PERCENT_100);
+    // Scale from 1/100 % to %
+    let et = scale_valid_i16(read_i16(&data[6..8]), SCALE_PERCENT_100);
+    let fi = scale_valid_i16(read_i16(&data[8..10]), SCALE_PERCENT_100);
 
     Ok((o2_status, et, fi))
 }
@@ -658,13 +628,9 @@ fn parse_n2o_group(data: &[u8]) -> Result<(GasStatus, Option<f64>, Option<f64>)>
     let header = GroupHeader::parse(&data[0..6])?;
     let n2o_status = GasStatus::from_status(header.status);
 
-    // ET - scale from 1/100 % to %
-    let et_raw = read_i16(&data[6..8]);
-    let et = scale_valid_i16(et_raw, SCALE_PERCENT_100);
-
-    // FI - scale from 1/100 % to %
-    let fi_raw = read_i16(&data[8..10]);
-    let fi = scale_valid_i16(fi_raw, SCALE_PERCENT_100);
+    // Scale from 1/100 % to %
+    let et = scale_valid_i16(read_i16(&data[6..8]), SCALE_PERCENT_100);
+    let fi = scale_valid_i16(read_i16(&data[8..10]), SCALE_PERCENT_100);
 
     Ok((n2o_status, et, fi))
 }
@@ -692,21 +658,12 @@ fn parse_aa_group(
 
     let header = GroupHeader::parse(&data[0..6])?;
     let aa_status = GasStatus::from_status(header.status);
-
-    // Label (agent type)
     let agent = AnesthesiaAgent::from_u16(header.label);
 
-    // ET - scale from 1/100 % to %
-    let et_raw = read_i16(&data[6..8]);
-    let et = scale_valid_i16(et_raw, SCALE_PERCENT_100);
-
-    // FI - scale from 1/100 % to %
-    let fi_raw = read_i16(&data[8..10]);
-    let fi = scale_valid_i16(fi_raw, SCALE_PERCENT_100);
-
-    // MAC - scale from 1/100 to decimal
-    let mac_raw = read_i16(&data[10..12]);
-    let mac = scale_valid_i16(mac_raw, SCALE_MAC_100);
+    // Scale from 1/100 % to %
+    let et = scale_valid_i16(read_i16(&data[6..8]), SCALE_PERCENT_100);
+    let fi = scale_valid_i16(read_i16(&data[8..10]), SCALE_PERCENT_100);
+    let mac = scale_valid_i16(read_i16(&data[10..12]), SCALE_MAC_100);
 
     Ok((aa_status, et, fi, mac, agent))
 }
@@ -719,6 +676,7 @@ struct FlowVolGroup {
     tv_exp: Option<i16>,
     mv_exp: Option<i16>,
 }
+
 /// Parse flow & volume group (offset 182 in basic class, 22 bytes)
 fn parse_flow_vol_group(
     data: &[u8],
@@ -748,33 +706,20 @@ fn parse_flow_vol_group(
         Some(rr_raw as f64)
     };
 
-    // Ppeak - scale from 1/100 cmH2O to cmH2O
-    let ppeak_raw = read_i16(&data[8..10]);
-    let ppeak = scale_valid_i16(ppeak_raw, SCALE_AWP_100);
+    // Scale pressures from 1/100 cmH2O to cmH2O
+    let ppeak = scale_valid_i16(read_i16(&data[8..10]), SCALE_AWP_100);
+    let peep = scale_valid_i16(read_i16(&data[10..12]), SCALE_AWP_100);
+    let pplat = scale_valid_i16(read_i16(&data[12..14]), SCALE_AWP_100);
 
-    // PEEP - scale from 1/100 cmH2O to cmH2O
-    let peep_raw = read_i16(&data[10..12]);
-    let peep = scale_valid_i16(peep_raw, SCALE_AWP_100);
+    // Scale volumes from 1/10 ml to ml
+    let tv_insp = scale_valid_i16(read_i16(&data[14..16]), SCALE_VOLUME_10);
+    let tv_exp = scale_valid_i16(read_i16(&data[16..18]), SCALE_VOLUME_10);
 
-    // Pplat - scale from 1/100 cmH2O to cmH2O
-    let pplat_raw = read_i16(&data[12..14]);
-    let pplat = scale_valid_i16(pplat_raw, SCALE_AWP_100);
+    // Scale compliance from 1/100 ml/cmH2O to ml/cmH2O
+    let compliance = scale_valid_i16(read_i16(&data[18..20]), SCALE_COMPLIANCE_100);
 
-    // TV-INSP - scale from 1/10 ml to ml
-    let tv_insp_raw = read_i16(&data[14..16]);
-    let tv_insp = scale_valid_i16(tv_insp_raw, SCALE_VOLUME_10);
-
-    // TV-EXP - scale from 1/10 ml to ml
-    let tv_exp_raw = read_i16(&data[16..18]);
-    let tv_exp = scale_valid_i16(tv_exp_raw, SCALE_VOLUME_10);
-
-    // Compliance - scale from 1/100 ml/cmH2O to ml/cmH2O
-    let compliance_raw = read_i16(&data[18..20]);
-    let compliance = scale_valid_i16(compliance_raw, SCALE_COMPLIANCE_100);
-
-    // MV-EXP - scale from 1/100 l/min to l/min
-    let mv_exp_raw = read_i16(&data[20..22]);
-    let mv_exp = scale_valid_i16(mv_exp_raw, SCALE_PERCENT_100); // Same scaling as percentage
+    // Scale MV from 1/100 l/min to l/min
+    let mv_exp = scale_valid_i16(read_i16(&data[20..22]), SCALE_PERCENT_100);
 
     Ok((
         flow_status,

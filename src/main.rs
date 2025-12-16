@@ -1,202 +1,250 @@
-use anyhow::Result;
-use env_logger::Env;
-use log::{error, info, warn};
+//! GE DRI Protocol Parser - Main Application
 
-use ge_dri_prototype::{
-    decode::Decoder,
-    device::{SerialDevice, select_port},
-    storage::{CsvWriter, JsonWriter, RawWriter},
-    ui,
-};
+use anyhow::Result;
+use chrono::Local;
+use ge_dri_prototype::decode::Decoder;
+use ge_dri_prototype::device::SerialDevice;
+use ge_dri_prototype::storage::{CsvWriter, JsonWriter, RawWriter};
+use ge_dri_prototype::ui;
 
 fn main() -> Result<()> {
     // Initialize logger
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     // Display banner
     ui::display_banner();
 
-    // Step 1: Select serial port
-    ui::progress("Scanning for serial ports...");
-    let port_name = select_port()?;
+    // Select serial port
+    let port_name = ge_dri_prototype::device::select_port()?;
     ui::success(&format!("Selected port: {}", port_name));
 
-    // Step 2: Open serial device
-    ui::progress("Opening serial connection...");
+    // Connect to device
+    ui::info("Connecting to monitor...");
     let mut device = SerialDevice::open(&port_name)?;
-    ui::success("Serial port opened successfully");
+    ui::success("Connected successfully!");
 
-    // Step 3: Configure data requests
-    println!("\n📊 Configuration:");
-    println!("─────────────────────────────────────────────────────────");
+    // Configure data collection
+    println!();
+    ui::info("=== Data Collection Configuration ===");
 
-    let interval = ui::get_input("Update interval for displayed values (seconds, min 5)", "5")?
-        .parse::<u16>()
-        .unwrap_or(5)
-        .max(5);
+    let interval = loop {
+        let input = ui::get_input("Update interval in seconds (5-3600)", "10")?;
+        if input.is_empty() {
+            break 10;
+        }
+        match input.parse::<u16>() {
+            Ok(val) if val >= 5 && val <= 3600 => break val,
+            _ => ui::error("Invalid interval. Must be between 5 and 3600 seconds."),
+        }
+    };
 
-    let waveforms_str = ui::get_input(
-        "Waveforms to request (comma-separated, e.g., ECG1,PLETH)",
+    let waveforms_input = ui::get_input(
+        "Waveforms to collect (comma-separated, e.g., ECG1,PLETH,CO2)",
         "ECG1,PLETH",
     )?;
 
-    let waveforms: Vec<&str> = waveforms_str
-        .split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let waveforms: Vec<String> = if waveforms_input.is_empty() {
+        vec!["ECG1".to_string(), "PLETH".to_string()]
+    } else {
+        waveforms_input
+            .split(',')
+            .map(|s| s.trim().to_uppercase())
+            .collect()
+    };
 
-    // Step 4: Request data
-    ui::progress("Requesting data from monitor...");
+    // Request data from monitor
+    ui::info("Requesting data from monitor...");
     device.request_displayed_values(interval)?;
 
-    if !waveforms.is_empty() {
-        device.request_waveforms(&waveforms)?;
-        ui::success(&format!(
-            "Requesting: {} (every {} sec) + waveforms: {}",
-            "Displayed values",
-            interval,
-            waveforms.join(", ")
-        ));
-    } else {
-        ui::success(&format!(
-            "Requesting: {} (every {} sec)",
-            "Displayed values", interval
-        ));
-    }
-
-    // Step 5: Setup storage
-    ui::progress("Initializing storage...");
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-
-    let csv_path = format!("output_{}.csv", timestamp);
-    let json_path = format!("output_{}.json", timestamp);
-    let raw_path = format!("output_{}.raw", timestamp);
-
-    let mut csv_writer = CsvWriter::new(&csv_path)?;
-    let mut json_writer = JsonWriter::new(&json_path)?;
-    let mut raw_writer = RawWriter::new(&raw_path)?;
+    // Convert String to &str for request_waveforms
+    let waveform_refs: Vec<&str> = waveforms.iter().map(|s| s.as_str()).collect();
+    device.request_waveforms(&waveform_refs)?;
 
     ui::success(&format!(
-        "Output files: {}, {}, {}",
-        csv_path, json_path, raw_path
+        "Requested displayed values ({}s interval) and waveforms: {}",
+        interval,
+        waveforms.join(", ")
     ));
 
-    // Step 6: Create decoder
-    let mut decoder = Decoder::new();
+    // Initialize storage
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+    let base_filename = format!("output_{}", timestamp);
 
-    // Step 7: Main data collection loop
-    println!("\n📡 Data Collection:");
-    println!("─────────────────────────────────────────────────────────");
-    ui::info("Press Ctrl+C to stop...\n");
+    let mut csv_writer = CsvWriter::new(format!("{}.csv", base_filename))?;
+    let mut json_writer = JsonWriter::new(format!("{}.json", base_filename))?;
+    let mut raw_writer = RawWriter::new(format!("{}.raw", base_filename))?;
+
+    ui::success(&format!(
+        "Created output files: {}.{{csv,json,raw}}",
+        base_filename
+    ));
+
+    // Initialize decoder
+    let decoder = Decoder::new();
+
+    // Main collection loop
+    println!();
+    ui::info("=== Starting Data Collection ===");
+    ui::info("Press Ctrl+C to stop");
+    println!();
 
     let mut frame_count = 0;
-    let mut phys_count = 0;
-    let mut wave_count = 0;
-    let start_time = std::time::Instant::now();
 
     loop {
         match device.read_frame() {
             Ok(frame) => {
-                frame_count += 1;
+                // Write raw frame
+                raw_writer.write_frame(&frame)?;
 
-                // Save raw data
-                if let Err(e) = raw_writer.write(&frame.complete_data()) {
-                    error!("Failed to write raw data: {}", e);
-                }
+                // Parse header from frame data
+                let header = match ge_dri_prototype::protocol::DriHeader::parse(&frame.data) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        ui::error(&format!("Failed to parse header: {}", e));
+                        continue;
+                    }
+                };
 
-                // Decode and process
-                match decoder.decode_frame(&frame) {
+                // Extract data portion (after header - 40 bytes)
+                let data = match header.extract_data(&frame.data) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        ui::error(&format!("Failed to extract data: {}", e));
+                        continue;
+                    }
+                };
+
+                // Decode frame with header and data
+                match decoder.decode_frame(&header, data) {
                     Ok(Some(record)) => {
-                        match record {
+                        frame_count += 1;
+
+                        // Write to storage
+                        match &record {
                             ge_dri_prototype::decode::DriRecord::Physiological(phys) => {
-                                phys_count += 1;
+                                csv_writer.write_physiological(phys)?;
+                                json_writer.write_physiological(phys)?;
 
-                                // Write to CSV and JSON
-                                let _ = csv_writer.write_physiological(&phys);
-                                let _ = json_writer.write_physiological(&phys);
+                                // Display live vitals
+                                print!("\r");
 
-                                // Display key vitals
-                                let hr = phys
-                                    .ecg_hr
-                                    .map(|v| format!("{}", v))
-                                    .unwrap_or("--".to_string());
-                                let spo2 = phys
-                                    .spo2
-                                    .map(|v| format!("{}", v))
-                                    .unwrap_or("--".to_string());
-                                let nibp = format!(
-                                    "{}/{}",
-                                    phys.nibp_sys
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or("--".to_string()),
-                                    phys.nibp_dia
-                                        .map(|v| format!("{}", v))
-                                        .unwrap_or("--".to_string())
-                                );
+                                // ECG
+                                if let Some(hr) = phys.ecg_hr {
+                                    print!(
+                                        "{} HR: {:.0} bpm",
+                                        if phys.ecg_status.active {
+                                            "💚"
+                                        } else {
+                                            "⚪"
+                                        },
+                                        hr
+                                    );
+                                }
 
-                                info!(
-                                    "Frame {:4} | HR: {:>3} | SpO2: {:>3} | BP: {:>7} | Time: {:?}",
-                                    frame_count,
-                                    hr,
-                                    spo2,
-                                    nibp,
-                                    phys.timestamp.format("%H:%M:%S")
-                                );
+                                // SpO2
+                                if let Some(spo2) = phys.spo2 {
+                                    print!(" | SpO2: {:.1}%", spo2);
+                                }
+
+                                // Blood Pressure
+                                if let Some(sys) = phys.nibp_sys {
+                                    if let Some(dia) = phys.nibp_dia {
+                                        print!(" | BP: {:.0}/{:.0}", sys, dia);
+                                    }
+                                }
+
+                                // Temperature
+                                if let Some(temp) = phys.temp1 {
+                                    print!(" | Temp: {:.1}°C", temp);
+                                }
+
+                                // CO2
+                                if let Some(etco2) = phys.co2_et {
+                                    print!(" | EtCO2: {:.1}%", etco2);
+                                }
+
+                                // Ventilator data
+                                if phys.flow_status.active {
+                                    if let Some(rr) = phys.flow_rr {
+                                        print!(" | RR: {:.0}", rr);
+                                    }
+                                    if let Some(peep) = phys.flow_peep {
+                                        print!(" | PEEP: {:.1}", peep);
+                                    }
+                                    if let Some(tv) = phys.flow_tv_exp {
+                                        print!(" | TV: {:.0}ml", tv);
+                                    }
+                                    if let Some(ppeak) = phys.flow_ppeak {
+                                        print!(" | Ppeak: {:.1}", ppeak);
+                                    }
+                                }
+
+                                // Flush output
+                                use std::io::{self, Write};
+                                io::stdout().flush()?;
                             }
-                            ge_dri_prototype::decode::DriRecord::Waveform(wave) => {
-                                wave_count += 1;
-
-                                // Write to CSV and JSON
-                                let _ = csv_writer.write_waveform(&wave);
-                                let _ = json_writer.write_waveform(&wave);
-
-                                info!(
-                                    "Frame {:4} | Waveform: {:?} | Samples: {} | Rate: {} Hz",
-                                    frame_count,
-                                    wave.waveform_type.name(),
-                                    wave.samples.len(),
-                                    wave.sample_rate
-                                );
+                            ge_dri_prototype::decode::DriRecord::Waveform { waveforms } => {
+                                for wf in waveforms {
+                                    csv_writer.write_waveform(wf)?;
+                                    json_writer.write_waveform(wf)?;
+                                }
                             }
+                        }
+
+                        // Show statistics every 100 frames
+                        if frame_count % 100 == 0 {
+                            println!();
+                            ui::success(&format!("📊 Processed {} frames", frame_count));
+                            print!("Current vitals: ");
                         }
                     }
                     Ok(None) => {
-                        // Frame decoded but no complete record yet
+                        // No data in frame (e.g., unsupported record type)
                     }
                     Err(e) => {
-                        warn!("Failed to decode frame {}: {}", frame_count, e);
+                        ui::error(&format!("Decode error: {}", e));
                     }
-                }
-
-                // Periodic statistics
-                if frame_count % 100 == 0 {
-                    let elapsed = start_time.elapsed().as_secs();
-                    println!("\n📈 Statistics after {} seconds:", elapsed);
-                    println!(
-                        "   Frames: {} | Physiological: {} | Waveforms: {}",
-                        frame_count, phys_count, wave_count
-                    );
-                    println!();
                 }
             }
             Err(e) => {
-                error!("Failed to read frame: {}", e);
+                println!();
+                ui::error(&format!("Read error: {}", e));
 
-                if ui::confirm("Connection error. Try to reconnect?")? {
-                    ui::progress("Attempting to reconnect...");
-                    device = SerialDevice::open(&port_name)?;
-                    device.request_displayed_values(interval)?;
-                    if !waveforms.is_empty() {
-                        device.request_waveforms(&waveforms)?;
+                // Ask user if they want to reconnect
+                if ui::confirm("Connection lost. Try to reconnect?")? {
+                    ui::info("Attempting to reconnect...");
+                    match SerialDevice::open(&port_name) {
+                        Ok(new_device) => {
+                            device = new_device;
+                            device.request_displayed_values(interval)?;
+
+                            // Convert String to &str again
+                            let waveform_refs: Vec<&str> =
+                                waveforms.iter().map(|s| s.as_str()).collect();
+                            device.request_waveforms(&waveform_refs)?;
+
+                            ui::success("Reconnected successfully!");
+                        }
+                        Err(e) => {
+                            ui::error(&format!("Reconnection failed: {}", e));
+                            break;
+                        }
                     }
-                    ui::success("Reconnected successfully");
                 } else {
                     break;
                 }
             }
         }
     }
+
+    // Cleanup
+    println!();
+    ui::info("Stopping data collection...");
+    device.stop_all()?;
+    ui::success(&format!(
+        "Collection stopped. Total frames: {}",
+        frame_count
+    ));
 
     Ok(())
 }
