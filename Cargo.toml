@@ -8,6 +8,10 @@ default-run = "ge-dri-prototype"
 name = "ge-dri-prototype"
 path = "src/main.rs"
 
+[[bin]]
+name = "diagnostic"
+path = "src/bin/diagnostic.rs"
+
 [dependencies]
 # Serial port communication
 serialport = "4.3"
