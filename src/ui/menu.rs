@@ -7,9 +7,9 @@ use dialoguer::{Confirm, Input};
 pub fn display_banner() {
     println!("\n╔═══════════════════════════════════════════════════════════╗");
     println!("║                                                           ║");
-    println!("║        GE DRI Protocol Parser - Prototype v0.1.0         ║");
+    println!("║        GE DRI Protocol Parser - Prototype v0.1.0          ║");
     println!("║                                                           ║");
-    println!("║  Compatible with: CARESCAPE B650/B850, S/5 Monitors      ║");
+    println!("║  Compatible with: CARESCAPE B650/B850, S/5 Monitors       ║");
     println!("║                                                           ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 }
